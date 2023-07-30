@@ -52,10 +52,6 @@ typedef struct bloom_filter {
     unsigned long bloom_length;
     uint64_t elements_added;
     BloomHashFunction hash_function;
-    /* on disk handeling */
-    short __is_on_disk;
-    FILE *filepointer;
-    uint64_t __filesize;
 } BloomFilter;
 
 
@@ -78,27 +74,6 @@ static __inline__ int bloom_filter_init_on_disk(BloomFilter *bf, uint64_t estima
 int bloom_filter_import_alt(BloomFilter *bf, const char *filepath, BloomHashFunction hash_function);
 static __inline__ int bloom_filter_import(BloomFilter *bf, const char *filepath) {
     return bloom_filter_import_alt(bf, filepath, NULL);
-}
-
-/*  Import a previously exported bloom filter from a file but do not pull the full bloom into memory.
-    This is allows for the speed / storage trade off of not needing to put the full bloom filter
-    into RAM. */
-int bloom_filter_import_on_disk_alt(BloomFilter *bf, const char *filepath, BloomHashFunction hash_function);
-static __inline__ int bloom_filter_import_on_disk(BloomFilter *bf, const char *filepath) {
-    return bloom_filter_import_on_disk_alt(bf, filepath, NULL);
-}
-
-/* Export the current bloom filter to file */
-int bloom_filter_export(BloomFilter *bf, const char *filepath);
-
-/*  Export and import as a hex string; not space effecient but allows for storing
-    multiple blooms in a single file or in a database, etc.
-
-    NOTE: It is up to the caller to free the allocated memory */
-char* bloom_filter_export_hex_string(BloomFilter *bf);
-int bloom_filter_import_hex_string_alt(BloomFilter *bf, const char *hex, BloomHashFunction hash_function);
-static __inline__ int bloom_filter_import_hex_string(BloomFilter *bf, char *hex) {
-    return bloom_filter_import_hex_string_alt(bf, hex, NULL);
 }
 
 /* Set or change the hashing function */

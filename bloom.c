@@ -14,10 +14,8 @@
 #include <stdio.h>          /* printf */
 #include <string.h>         /* strlen */
 #include <fcntl.h>          /* O_RDWR */
-#include <sys/mman.h>       /* mmap, mummap */
 #include <sys/types.h>      /* */
 #include <sys/stat.h>       /* fstat */
-#include <unistd.h>         /* close */
 #include "bloom.h"
 
 
@@ -62,28 +60,7 @@ int bloom_filter_init_alt(BloomFilter *bf, uint64_t estimated_elements, float fa
     bf->bloom = (unsigned char*)calloc(bf->bloom_length + 1, sizeof(char)); // pad to ensure no running off the end
     bf->elements_added = 0;
     bloom_filter_set_hash_function(bf, hash_function);
-    bf->__is_on_disk = 0; // not on disk
     return BLOOM_SUCCESS;
-}
-
-int bloom_filter_init_on_disk_alt(BloomFilter *bf, uint64_t estimated_elements, float false_positive_rate, const char *filepath, BloomHashFunction hash_function) {
-    if(estimated_elements == 0 || estimated_elements > UINT64_MAX || false_positive_rate <= 0.0 || false_positive_rate >= 1.0) {
-        return BLOOM_FAILURE;
-    }
-    bf->estimated_elements = estimated_elements;
-    bf->false_positive_probability = false_positive_rate;
-    __calculate_optimal_hashes(bf);
-    bf->elements_added = 0;
-    FILE *fp;
-    fp = fopen(filepath, "w+b");
-    if (fp == NULL) {
-        fprintf(stderr, "Can't open file %s!\n", filepath);
-        return BLOOM_FAILURE;
-    }
-    __write_to_file(bf, fp, 1);
-    fclose(fp);
-    // slightly ineffecient to redo some of the calculations...
-    return bloom_filter_import_on_disk_alt(bf, filepath, hash_function);
 }
 
 void bloom_filter_set_hash_function(BloomFilter *bf, BloomHashFunction hash_function) {
@@ -91,22 +68,14 @@ void bloom_filter_set_hash_function(BloomFilter *bf, BloomHashFunction hash_func
 }
 
 int bloom_filter_destroy(BloomFilter *bf) {
-    if (bf->__is_on_disk == 0) {
-        free(bf->bloom);
-    } else {
-        fclose(bf->filepointer);
-        munmap(bf->bloom, bf->__filesize);
-    }
+    free(bf->bloom);
     bf->bloom = NULL;
-    bf->filepointer = NULL;
     bf->elements_added = 0;
     bf->estimated_elements = 0;
     bf->false_positive_probability = 0;
     bf->number_hashes = 0;
     bf->number_bits = 0;
     bf->hash_function = NULL;
-    bf->__is_on_disk = 0;
-    bf->__filesize = 0;
     return BLOOM_SUCCESS;
 }
 
@@ -120,7 +89,6 @@ int bloom_filter_clear(BloomFilter *bf) {
 }
 
 void bloom_filter_stats(BloomFilter *bf) {
-    const char *is_on_disk = (bf->__is_on_disk == 0 ? "no" : "yes");
     uint64_t size_on_disk = bloom_filter_export_size(bf);
 
     printf("BloomFilter\n\
@@ -133,13 +101,12 @@ void bloom_filter_stats(BloomFilter *bf) {
     estimated elements added: %" PRIu64 "\n\
     current false positive rate: %f\n\
     export size (bytes): %" PRIu64 "\n\
-    number bits set: %" PRIu64 "\n\
-    is on disk: %s\n",
+    number bits set: %" PRIu64 "\n",
     bf->number_bits, bf->estimated_elements, bf->number_hashes,
     bf->false_positive_probability, bf->bloom_length, bf->elements_added,
     bloom_filter_estimate_elements(bf),
     bloom_filter_current_false_positive_rate(bf), size_on_disk,
-    bloom_filter_count_set_bits(bf), is_on_disk);
+    bloom_filter_count_set_bits(bf));
 }
 
 int bloom_filter_add_string(BloomFilter *bf, const char *str) {
@@ -179,11 +146,9 @@ int bloom_filter_add_string_alt(BloomFilter *bf, uint64_t *hashes, unsigned int 
         unsigned long idx = (hashes[i] % bf->number_bits) / 8;
         int bit = (hashes[i] % bf->number_bits) % 8;
 
-        #pragma omp atomic update
         bf->bloom[idx] |= (1 << bit); // set the bit
     }
 
-    #pragma omp atomic update
     bf->elements_added++;
     __update_elements_added_on_disk(bf);
     return BLOOM_SUCCESS;
@@ -213,100 +178,6 @@ float bloom_filter_current_false_positive_rate(BloomFilter *bf) {
     double d = -num / (float) bf->number_bits;
     double e = exp(d);
     return pow((1 - e), bf->number_hashes);
-}
-
-int bloom_filter_export(BloomFilter *bf, const char *filepath) {
-    // if the bloom is initialized on disk, no need to export it
-    if (bf->__is_on_disk == 1) {
-        return BLOOM_SUCCESS;
-    }
-    FILE *fp;
-    fp = fopen(filepath, "w+b");
-    if (fp == NULL) {
-        fprintf(stderr, "Can't open file %s!\n", filepath);
-        return BLOOM_FAILURE;
-    }
-    __write_to_file(bf, fp, 0);
-    fclose(fp);
-    return BLOOM_SUCCESS;
-}
-
-int bloom_filter_import_alt(BloomFilter *bf, const char *filepath, BloomHashFunction hash_function) {
-    FILE *fp;
-    fp = fopen(filepath, "r+b");
-    if (fp == NULL) {
-        fprintf(stderr, "Can't open file %s!\n", filepath);
-        return BLOOM_FAILURE;
-    }
-    __read_from_file(bf, fp, 0, NULL);
-    fclose(fp);
-    bloom_filter_set_hash_function(bf, hash_function);
-    bf->__is_on_disk = 0; // not on disk
-    return BLOOM_SUCCESS;
-}
-
-int bloom_filter_import_on_disk_alt(BloomFilter *bf, const char *filepath, BloomHashFunction hash_function) {
-    bf->filepointer = fopen(filepath, "r+b");
-    if (bf->filepointer == NULL) {
-        fprintf(stderr, "Can't open file %s!\n", filepath);
-        return BLOOM_FAILURE;
-    }
-    __read_from_file(bf, bf->filepointer, 1, filepath);
-    // don't close the file pointer here...
-    bloom_filter_set_hash_function(bf, hash_function);
-    bf->__is_on_disk = 1; // on disk
-    return BLOOM_SUCCESS;
-}
-
-char* bloom_filter_export_hex_string(BloomFilter *bf) {
-    uint64_t i, bytes = sizeof(uint64_t) * 2 + sizeof(float) + (bf->bloom_length);
-    char* hex = (char*)calloc((bytes * 2 + 1), sizeof(char));
-    for (i = 0; i < bf->bloom_length; ++i) {
-        sprintf(hex + (i * 2), "%02x", bf->bloom[i]); // not the fastest way, but works
-    }
-    i = bf->bloom_length * 2;
-    sprintf(hex + i, "%016" PRIx64 "", bf->estimated_elements);
-    i += 16; // 8 bytes * 2 for hex
-    sprintf(hex + i, "%016" PRIx64 "", bf->elements_added);
-
-    unsigned int ui;
-    memcpy(&ui, &bf->false_positive_probability, sizeof (ui));
-    i += 16; // 8 bytes * 2 for hex
-    sprintf(hex + i, "%08x", ui);
-    return hex;
-}
-
-int bloom_filter_import_hex_string_alt(BloomFilter *bf, const char *hex, BloomHashFunction hash_function) {
-    uint64_t len = strlen(hex);
-    if (len % 2 != 0) {
-        fprintf(stderr, "Unable to parse; exiting\n");
-        return BLOOM_FAILURE;
-    }
-    char fpr[9] = {0};
-    char est_els[17] = {0};
-    char ins_els[17] = {0};
-    memcpy(fpr, hex + (len - 8), 8);
-    memcpy(ins_els, hex + (len - 24), 16);
-    memcpy(est_els, hex + (len - 40), 16);
-    uint32_t t_fpr;
-
-    bf->estimated_elements = strtoull(est_els, NULL, 16);
-    bf->elements_added = strtoull(ins_els, NULL, 16);
-    sscanf(fpr, "%x", &t_fpr);
-    float f;
-    memcpy(&f, &t_fpr, sizeof(float));
-    bf->false_positive_probability = f;
-    bloom_filter_set_hash_function(bf, hash_function);
-
-    __calculate_optimal_hashes(bf);
-    bf->bloom = (unsigned char*)calloc(bf->bloom_length + 1, sizeof(char));  // pad
-    bf->__is_on_disk = 0; // not on disk
-
-    uint64_t i;
-    for (i = 0; i < bf->bloom_length; ++i) {
-        sscanf(hex + (i * 2), "%2hx", (short unsigned int*)&bf->bloom[i]);
-    }
-    return BLOOM_SUCCESS;
 }
 
 uint64_t bloom_filter_export_size(BloomFilter *bf) {
@@ -427,70 +298,6 @@ static int __check_if_union_or_intersection_ok(BloomFilter *res, BloomFilter *bf
         return BLOOM_FAILURE;
     }
     return BLOOM_SUCCESS;
-}
-
-/* NOTE: this assumes that the file handler is open and ready to use */
-static void __write_to_file(BloomFilter *bf, FILE *fp, short on_disk) {
-    if (on_disk == 0) {
-        fwrite(bf->bloom, bf->bloom_length, 1, fp);
-    } else {
-        // will need to write out everything by hand
-        uint64_t i;
-        for (i = 0; i < bf->bloom_length; ++i) {
-            fputc(0, fp);
-        }
-    }
-    fwrite(&bf->estimated_elements, sizeof(uint64_t), 1, fp);
-    fwrite(&bf->elements_added, sizeof(uint64_t), 1, fp);
-    fwrite(&bf->false_positive_probability, sizeof(float), 1, fp);
-}
-
-/* NOTE: this assumes that the file handler is open and ready to use */
-static void __read_from_file(BloomFilter *bf, FILE *fp, short on_disk, const char *filename) {
-    int offset = sizeof(uint64_t) * 2 + sizeof(float);
-    fseek(fp, offset * -1, SEEK_END);
-
-    fread(&bf->estimated_elements, sizeof(uint64_t), 1, fp);
-    fread(&bf->elements_added, sizeof(uint64_t), 1, fp);
-    fread(&bf->false_positive_probability, sizeof(float), 1, fp);
-    __calculate_optimal_hashes(bf);
-    rewind(fp);
-    if(on_disk == 0) {
-        bf->bloom = (unsigned char*)calloc(bf->bloom_length + 1, sizeof(char));
-        size_t read;
-        read = fread(bf->bloom, sizeof(char), bf->bloom_length, fp);
-        if (read != bf->bloom_length) {
-            perror("__read_from_file: ");
-            exit(1);
-        }
-    } else {
-        struct stat buf;
-        int fd = open(filename, O_RDWR);
-        if (fd < 0) {
-            perror("open: ");
-            exit(1);
-        }
-        fstat(fd, &buf);
-        bf->__filesize = buf.st_size;
-        bf->bloom = (unsigned char*)mmap((caddr_t)0, bf->__filesize, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
-        if (bf->bloom == (unsigned char*) - 1) {
-            perror("mmap: ");
-            exit(1);
-        }
-        // close the file descriptor
-        close(fd);
-    }
-}
-
-static void __update_elements_added_on_disk(BloomFilter* bf) {
-    if (bf->__is_on_disk == 1) { // only do this if it is on disk!
-        int offset = sizeof(uint64_t) + sizeof(float);
-        #pragma omp critical (bloom_filter_critical_on_disk)
-        {
-            fseek(bf->filepointer, offset * -1, SEEK_END);
-            fwrite(&bf->elements_added, sizeof(uint64_t), 1, bf->filepointer);
-        }
-    }
 }
 
 /* NOTE: The caller will free the results */

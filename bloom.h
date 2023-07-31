@@ -35,7 +35,7 @@ extern "C" {
 #define BLOOMFILTER_REVISION 2
 
 #define BLOOM_SUCCESS 0
-#define BLOOM_FAILURE -1
+#define BLOOM_FAILURE 1
 
 #define bloom_filter_get_version()    (BLOOMFILTER_VERSION)
 
